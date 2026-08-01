@@ -61,7 +61,6 @@ def parse_question_html(html_content: str) -> tuple[str | None, bool]:
         t_text = tag.text.strip()
         if "niezgodne z aktualną wiedzą" in t_text.lower() or "inconsistent with current knowledge" in t_text.lower():
             if "UWAGA!" in t_text or "NOTE!" in t_text:
-                # Clean up whitespace/newlines inside notice
                 warning_text = " ".join(t_text.split())
                 break
 
@@ -133,7 +132,7 @@ def parse_question_html(html_content: str) -> tuple[str | None, bool]:
 
 
 async def worker_task(worker_id: int, queue: asyncio.Queue, playwright, max_questions: int = 200):
-    """Worker process: manages a browser instance and appends questions to disk live."""
+    """Worker process: fills selection forms automatically and appends questions live to disk."""
     print(f"🚀 [Worker {worker_id}] Browser starting up...")
 
     browser = await playwright.chromium.launch(
@@ -158,24 +157,32 @@ async def worker_task(worker_id: int, queue: asyncio.Queue, playwright, max_ques
         out_file = os.path.join(OUTPUT_DIR, f"{session_name}.md")
 
         print("\n" + "=" * 60)
-        print(f"🔔 \a[Worker {worker_id}] ATTENTION: Ready for '{session_name}'")
-        print(f"👉 Solve reCAPTCHA in Browser Window #{worker_id} & click 'Pokaż pytanie'")
+        print(f"🔔 \a[Worker {worker_id}] ATTENTION: Preparing '{session_name}'")
         print("=" * 60 + "\n")
 
-        # 1. Initialize file with header (overwrites any previous attempt)
+        # 1. Initialize file with header
         with open(out_file, "w", encoding="utf-8") as f:
             file_header = f"# LEK - {session_name.replace('_', ' ').title()}\n\n---\n\n"
             f.write(file_header)
 
-        # 2. Navigate & select session
+        # 2. Navigate to start URL
         await page.goto(START_URL)
-        await page.wait_for_selector("#sesja")
-        await page.select_option("#sesja", session_code)
-        await asyncio.sleep(0.5)
 
-        # 3. Wait for user captcha completion (5 min timeout)
+        # 3. Wait up to 5 minutes (300,000 ms) for question selection form to appear
+        print(f"⏳ [Worker {worker_id}] Waiting for question selection page...")
         try:
-            await page.wait_for_url("**/wyswietl_pytania_lek_p.php", timeout=300000)
+            await page.wait_for_selector("#sesja", timeout=300000)
+            await page.select_option("#sesja", session_code)
+            print(f"  [Worker {worker_id}] Automatically selected session '{session_code}' ({session_name}).")
+        except Exception:
+            print(f"❌ [Worker {worker_id}] Timed out waiting for question selection page for {session_name}.")
+            queue.task_done()
+            continue
+
+        # 4. Wait up to 10 minutes (600,000 ms) for reCAPTCHA completion and form submission
+        print(f"👉 [Worker {worker_id}] Solve reCAPTCHA in Browser Window #{worker_id} & click 'Pokaż pytanie'")
+        try:
+            await page.wait_for_url("**/wyswietl_pytania_lek_p.php", timeout=600000)
         except Exception:
             print(f"❌ [Worker {worker_id}] Timed out waiting for captcha on session {session_name}.")
             queue.task_done()
@@ -185,7 +192,7 @@ async def worker_task(worker_id: int, queue: asyncio.Queue, playwright, max_ques
 
         scraped_count = 0
 
-        # 4. Scrape & APPEND live to disk
+        # 5. Scrape & APPEND live to disk
         for q_num in range(1, max_questions + 1):
             await page.wait_for_selector("div.marginesy")
             html = await page.content()
