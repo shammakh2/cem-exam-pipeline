@@ -1,0 +1,13 @@
+.venv/
+env/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# Project Data
+data/processed
+data/raw
+*.pdf
+*.md
+!README.md
