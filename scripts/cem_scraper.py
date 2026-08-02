@@ -9,21 +9,28 @@ OUTPUT_DIR = os.path.join("data", "processed")
 
 # Exam sessions queue
 SESSIONS_TO_SCRAPE = [
-    {"code": "20261", "name": "LEK_wiosna_2026"},
-    {"code": "20252", "name": "LEK_jesien_2025"},
-    {"code": "20251", "name": "LEK_wiosna_2025"},
-    {"code": "20242", "name": "LEK_jesien_2024"},
-    # {"code": "20241", "name": "LEK_wiosna_2024"},
-    # {"code": "20232", "name": "LEK_jesien_2023"},
-    # {"code": "20231", "name": "LEK_wiosna_2023"},
-    # {"code": "20222", "name": "LEK_jesien_2022"},
-    # {"code": "20221", "name": "LEK_wiosna_2022"},
-    # {"code": "20212", "name": "LEK_jesien_2021"},
-    # {"code": "20211", "name": "LEK_wiosna_2021"},
+    # {"code": "20261", "name": "LEK_wiosna_2026"},
+    # {"code": "20252", "name": "LEK_jesien_2025"},
+    # {"code": "20251", "name": "LEK_wiosna_2025"},
+    # {"code": "20242", "name": "LEK_jesien_2024"},
+    {"code": "20241", "name": "LEK_wiosna_2024"},
+    {"code": "20232", "name": "LEK_jesien_2023"},
+    {"code": "20231", "name": "LEK_wiosna_2023"},
+    {"code": "20222", "name": "LEK_jesien_2022"},
+    {"code": "20221", "name": "LEK_wiosna_2022"},
+    {"code": "20212", "name": "LEK_jesien_2021"},
+    {"code": "20211", "name": "LEK_wiosna_2021"},
+    {"code": "20152", "name": "LEK_jesien_2015"},
+    {"code": "20151", "name": "LEK_wiosna_2015"},
+    {"code": "20142", "name": "LEK_jesien_2014"},
+    {"code": "20141", "name": "LEK_wiosna_2014"},
+    {"code": "20132", "name": "LEK_jesien_2013"},
+    {"code": "20131", "name": "LEK_wiosna_2013"},
 ]
 
 NUM_WORKERS = 4           # Number of parallel browsers
 STAGGER_DELAY = 30       # Seconds between spawning each worker browser window
+MAX_SESSION_ATTEMPTS = 3  # Maximum setup retries before skipping a session
 
 
 def parse_question_html(html_content: str) -> tuple[str | None, bool]:
@@ -132,7 +139,7 @@ def parse_question_html(html_content: str) -> tuple[str | None, bool]:
 
 
 async def worker_task(worker_id: int, queue: asyncio.Queue, playwright, max_questions: int = 200):
-    """Worker process: fills selection forms automatically and appends questions live to disk."""
+    """Worker process: fills selection forms automatically, handles setup retries, and appends questions live."""
     print(f"🚀 [Worker {worker_id}] Browser starting up...")
 
     browser = await playwright.chromium.launch(
@@ -160,35 +167,54 @@ async def worker_task(worker_id: int, queue: asyncio.Queue, playwright, max_ques
         print(f"🔔 \a[Worker {worker_id}] ATTENTION: Preparing '{session_name}'")
         print("=" * 60 + "\n")
 
-        # 1. Initialize file with header
-        with open(out_file, "w", encoding="utf-8") as f:
-            file_header = f"# LEK - {session_name.replace('_', ' ').title()}\n\n---\n\n"
-            f.write(file_header)
+        session_ready = False
 
-        # 2. Navigate to start URL
-        await page.goto(START_URL)
+        # --- RETRY LOOP FOR SETUP & CAPTCHA ---
+        for attempt in range(1, MAX_SESSION_ATTEMPTS + 1):
+            print(f"🔄 [Worker {worker_id}] Setup attempt {attempt}/{MAX_SESSION_ATTEMPTS} for '{session_name}'...")
+            
+            # 1. Navigate to Start Page
+            try:
+                await page.goto(START_URL)
+            except Exception as e:
+                print(f"⚠️ [Worker {worker_id}] Failed navigating to {START_URL}: {e}")
+                await asyncio.sleep(2)
+                continue
 
-        # 3. Wait up to 5 minutes (300,000 ms) for question selection form to appear
-        print(f"⏳ [Worker {worker_id}] Waiting for question selection page...")
-        try:
-            await page.wait_for_selector("#sesja", timeout=300000)
-            await page.select_option("#sesja", session_code)
-            print(f"  [Worker {worker_id}] Automatically selected session '{session_code}' ({session_name}).")
-        except Exception:
-            print(f"❌ [Worker {worker_id}] Timed out waiting for question selection page for {session_name}.")
-            queue.task_done()
-            continue
+            # 2. Wait up to 5 minutes (300,000 ms) for question selection form
+            print(f"⏳ [Worker {worker_id}] Waiting for question selection page...")
+            try:
+                await page.wait_for_selector("#sesja", timeout=300000)
+                await page.select_option("#sesja", session_code)
+                print(f"  [Worker {worker_id}] Automatically selected session '{session_code}' ({session_name}).")
+            except Exception:
+                print(f"⚠️ [Worker {worker_id}] Timed out waiting for `#sesja` on attempt {attempt}. Retrying session setup...")
+                await asyncio.sleep(2)
+                continue
 
-        # 4. Wait up to 10 minutes (600,000 ms) for reCAPTCHA completion and form submission
-        print(f"👉 [Worker {worker_id}] Solve reCAPTCHA in Browser Window #{worker_id} & click 'Pokaż pytanie'")
-        try:
-            await page.wait_for_url("**/wyswietl_pytania_lek_p.php", timeout=600000)
-        except Exception:
-            print(f"❌ [Worker {worker_id}] Timed out waiting for captcha on session {session_name}.")
+            # 3. Wait up to 10 minutes (600,000 ms) for reCAPTCHA completion and form submission
+            print(f"👉 [Worker {worker_id}] Solve reCAPTCHA in Browser Window #{worker_id} & click 'Pokaż pytanie'")
+            try:
+                await page.wait_for_url("**/wyswietl_pytania_lek_p.php", timeout=600000)
+                session_ready = True
+                break  # Setup successful, exit retry loop
+            except Exception:
+                print(f"⚠️ [Worker {worker_id}] Timed out waiting for reCAPTCHA on attempt {attempt}. Reloading session page...")
+                await asyncio.sleep(2)
+                continue
+
+        # If all attempts failed, skip session
+        if not session_ready:
+            print(f"❌ [Worker {worker_id}] Failed setup for {session_name} after {MAX_SESSION_ATTEMPTS} attempts. Skipping.")
             queue.task_done()
             continue
 
         print(f"✅ [Worker {worker_id}] Captcha verified for {session_name}! Live extraction starting...\n")
+
+        # 4. Initialize Markdown file on successful setup
+        with open(out_file, "w", encoding="utf-8") as f:
+            file_header = f"# LEK - {session_name.replace('_', ' ').title()}\n\n---\n\n"
+            f.write(file_header)
 
         scraped_count = 0
 

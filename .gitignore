@@ -8,6 +8,8 @@ __pycache__/
 # Project Data
 data/processed
 data/raw
+data/intermediates
+data/outputs
 *.pdf
 *.md
 !README.md
